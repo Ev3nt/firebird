@@ -745,7 +745,6 @@ namespace
 				case 7:
 				{
 					T* routine = lookupById(tdbb, work->dfw_id, CacheFlag::NOSCAN);
-					fb_assert(routine);
 					if (routine)
 						routine->commit(tdbb);
 
