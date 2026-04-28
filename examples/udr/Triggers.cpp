@@ -21,9 +21,69 @@
  */
 
 #include "UdrCppExample.h"
+#include <stdarg.h>
 
 using namespace Firebird;
 
+static constexpr size_t MAX_BUFFER_SIZE = 65536;
+
+template <typename StatusType>
+void overflow(StatusType* status)
+{
+	static const ISC_STATUS statusVector[] =
+	{
+		isc_arg_gds, isc_random,
+		isc_arg_string, (ISC_STATUS) "internal buffer overflow",
+		isc_arg_end
+	};
+
+	throw FbException(status, statusVector);
+}
+template <typename StatusType, size_t size>
+class StaticBuffer
+{
+public:
+	StaticBuffer(StatusType* status) : status(status) {}
+
+	void append(const char* str)
+	{
+		size_t add = strlen(str);
+		if (length + add >= size)
+			overflow(status);
+
+		memcpy(buffer + length, str, add);
+		length += add;
+		buffer[length] = '\0';
+	}
+
+	void appendf(const char* format, ...)
+	{
+		va_list args;
+		va_start(args, format);
+
+		int written = vsnprintf(buffer + length, size - length, format, args);
+
+		va_end(args);
+
+		if (written < 0 || length + written >= size)
+			overflow(status);
+
+		length += written;
+	}
+
+	const char* data()
+	{
+		return buffer;
+	}
+
+private:
+	StatusType* status;
+	char buffer[size] {};
+	size_t length = 0;
+};
+
+template <size_t size>
+using ThrowStaticBuffer = StaticBuffer<ThrowStatusWrapper, size>;
 
 //------------------------------------------------------------------------------
 
@@ -124,70 +184,59 @@ FB_UDR_BEGIN_TRIGGER(replicate)
 
 		unsigned count = triggerMetadata->getCount(status);
 
-		char buffer[65536];
-		strcpy(buffer, "execute block (\n");
+		ThrowStaticBuffer<MAX_BUFFER_SIZE> buffer(status);
+		buffer.append("execute block (\n");
 
 		for (unsigned i = 0; i < count; ++i)
 		{
 			if (i > 0)
-				strcat(buffer, ",\n");
+				buffer.append(",\n");
 
 			const char* name = triggerMetadata->getField(status, i);
 
-			strcat(buffer, "    p");
-			const size_t buflen = strlen(buffer);
-			snprintf(buffer + buflen, sizeof(buffer) - buflen, "%u type of column \"%s\".\"%s\" = ?", i, table, name);
+			buffer.appendf("    p%u type of column \"%s\".\"%s\" = ?", i, table, name);
 		}
 
-		strcat(buffer,
+		buffer.appendf(
 			")\n"
 			"as\n"
 			"begin\n"
-			"    execute statement ('insert into \"");
-
-		strcat(buffer, table);
-		strcat(buffer, "\" (");
+			"    execute statement ('insert into \"%s\" (", table);
 
 		for (unsigned i = 0; i < count; ++i)
 		{
 			if (i > 0)
-				strcat(buffer, ", ");
+				buffer.append(", ");
 
 			const char* name = triggerMetadata->getField(status, i);
 
-			strcat(buffer, "\"");
-			strcat(buffer, name);
-			strcat(buffer, "\"");
+			buffer.appendf("\"%s\"", name);
 		}
 
-		strcat(buffer, ") values (");
+		buffer.append(") values (");
 
 		for (unsigned i = 0; i < count; ++i)
 		{
 			if (i > 0)
-				strcat(buffer, ", ");
-			strcat(buffer, "?");
+				buffer.append(", ");
+			buffer.append("?");
 		}
 
-		strcat(buffer, ")') (");
+		buffer.append(")') (");
 
 		for (unsigned i = 0; i < count; ++i)
 		{
 			if (i > 0)
-				strcat(buffer, ", ");
-			strcat(buffer, ":p");
-			const size_t buflen = strlen(buffer);
-			snprintf(buffer + buflen, sizeof(buffer) - buflen, "%u", i);
+				buffer.append(", ");
+			buffer.appendf(":p%u", i);
 		}
 
-		strcat(buffer, ")\n        on external data source '");
-		strcat(buffer, outSqlDa->sqlvar[0].sqldata + sizeof(short));
-		strcat(buffer, "';\nend");
+		buffer.appendf(")\n        on external data source '%s';\nend", outSqlDa->sqlvar[0].sqldata + sizeof(short));
 
 		AutoRelease<IAttachment> attachment(context->getAttachment(status));
 		AutoRelease<ITransaction> transaction(context->getTransaction(status));
 
-		stmt.reset(attachment->prepare(status, transaction, 0, buffer, SQL_DIALECT_CURRENT, 0));
+		stmt.reset(attachment->prepare(status, transaction, 0, buffer.data(), SQL_DIALECT_CURRENT, 0));
 
 		delete [] outSqlDa->sqlvar[0].sqldata;
 		delete [] reinterpret_cast<char*>(outSqlDa);
