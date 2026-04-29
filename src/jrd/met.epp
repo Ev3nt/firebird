@@ -4755,10 +4755,10 @@ void MetadataCache::releaseLocks(thread_db* tdbb)
 
 void MetadataCache::invalidateReplSet(thread_db* tdbb)
 {
-	for (auto relation : mdc_relations)
+	for (auto* relation : mdc_relations)
 	{
 		if (relation)
-			relation->rel_repl_state.reset();
+			relation->rel_repl_state = RelationPermanent::Bool3State::Unknown;
 	}
 }
 

@@ -2277,7 +2277,6 @@ static bool change_repl_state(thread_db* tdbb, SSHORT phase, DeferredWork* work,
  **************************************/
 	SET_TDBB(tdbb);
 	Database* const dbb = tdbb->getDatabase();
-	Attachment* const attachment = tdbb->getAttachment();
 
 	switch (phase)
 	{
@@ -2295,7 +2294,7 @@ static bool change_repl_state(thread_db* tdbb, SSHORT phase, DeferredWork* work,
 		else
 		{
 			// replication set is changed
-			attachment->invalidateReplSet(tdbb, true);
+			dbb->invalidateReplSet(tdbb, true);
 		}
 		break;
 	}
