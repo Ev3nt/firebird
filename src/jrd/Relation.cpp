@@ -765,7 +765,7 @@ Lock* RelationPermanent::createLock(thread_db* tdbb, MemoryPool& pool, lck_t lck
 
 void RelationPermanent::addFormat(Format* fmt)
 {
-	MutexLockGuard g(rel_formats_grow, FB_FUNCTION);
+	MutexLockGuard guard(rel_formats_grow, FB_FUNCTION);
 
 	rel_formats.grow(fmt->fmt_version + 1, true);
 	rel_formats.writeAccessor()->value(fmt->fmt_version) = fmt;
@@ -1153,7 +1153,7 @@ const Format* jrd_rel::currentFormat(thread_db* tdbb)
 	if (!tdbb)
 		tdbb = JRD_get_thread_data();
 
-	rel_current_format = MET_format(tdbb, getPermanent(), rel_current_fmt);
+	rel_current_format = getPermanent()->getFormat(tdbb, rel_current_fmt);
 
 	return rel_current_format;
 }

@@ -645,7 +645,7 @@ private:
 
 public:
 	USHORT				rel_current_fmt;	// Current format number
-	Format*				rel_current_format;	// Current record format
+	const Format*		rel_current_format;	// Current record format
 	USHORT				rel_dbkey_length;	// RDB$DBKEY length
 
 	vec<jrd_fld*>*		rel_fields;			// vector of field blocks
@@ -984,7 +984,7 @@ public:
 	typedef SharedReadVector<Format*, 16> Formats;
 
 private:
-	SharedReadVector<Format*, 16> rel_formats;	// Known record formats
+	Formats rel_formats;				// Known record formats
 	Firebird::Mutex rel_formats_grow;	// Mutex to grow rel_formats
 
 public:
@@ -994,6 +994,7 @@ public:
 	}
 
 	void addFormat(Format* fmt);
+	const Format* getFormat(thread_db* tdbb, USHORT );
 
 	Indices			rel_indices;		// Active indices
 	QualifiedName	rel_name;			// ascii relation name
