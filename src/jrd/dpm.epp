@@ -1754,6 +1754,72 @@ punt:
 	return 0UL;
 }
 
+#include <queue>
+#include <condition_variable>
+
+class Prefetcher
+{
+public:
+	static Prefetcher& get()
+	{
+		static Prefetcher prefetcher;
+		return prefetcher;
+	}
+
+	~Prefetcher()
+	{
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			stop_ = true;
+		}
+		cv_.notify_one();
+		if (thread_.joinable())
+			thread_.join();
+	}
+
+	void prefetch(thread_db* tdbb, ULONG* queue, int count)
+	{
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			for (int i = 0; i < count; i++)
+				pages_.push({tdbb, queue[i]});
+		}
+		cv_.notify_one(); // или notify_all, если воркеров несколько
+	}
+
+private:
+	Prefetcher() : stop_(false)
+	{
+		thread_ = std::thread([this]()
+		{
+			while (true)
+			{
+				std::unique_lock<std::mutex> lock(mutex_);
+				cv_.wait(lock, [this] { return !pages_.empty() || stop_; });
+
+				if (stop_ && pages_.empty())
+					return;
+
+				auto [tdbb, page] = pages_.front();
+				pages_.pop();
+				lock.unlock(); // освобождаем мьютекс до I/O
+
+				WIN window(1, page);
+				if (!CCH_FETCH(tdbb, &window, LCK_read, pag_data))
+					continue;
+
+				CCH_RELEASE(tdbb, &window);
+			}
+		});
+	}
+
+	std::queue<std::pair<thread_db*, ULONG>> pages_;
+	std::mutex mutex_;
+	std::condition_variable cv_;
+	std::thread thread_;
+	bool stop_;
+};
+
 
 bool DPM_next(thread_db* tdbb, record_param* rpb, USHORT lock_type, FindNextRecordScope scope)
 {
@@ -1901,6 +1967,22 @@ bool DPM_next(thread_db* tdbb, record_param* rpb, USHORT lock_type, FindNextReco
 					}
 				}
 #endif
+				if (scope != DPM_next_data_page)
+				{
+					static constexpr int PREFETCH_MAX_PAGES = 5;
+					USHORT tslot = slot;
+					int i;
+
+					ULONG pages[PREFETCH_MAX_PAGES + 1];
+					for (i = 0; i < PREFETCH_MAX_PAGES && tslot < ppage->ppg_count; i++, tslot++)
+						pages[i] = ppage->ppg_page[tslot];
+
+					if (tslot >= ppage->ppg_count)
+						pages[i++] = ppage->ppg_next;
+
+					Prefetcher::get().prefetch(tdbb, pages, i);
+				}
+
 				dpSequence = ppage->ppg_sequence * dbb->dbb_dp_per_pp + slot;
 				relPages->setDPNumber(dpSequence, page_number);
 				const data_page* dpage = (data_page*) CCH_HANDOFF(tdbb, window,

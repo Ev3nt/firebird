@@ -10,7 +10,6 @@
 			"stopAtEntry": false,
 			"cwd": "${workspaceRoot}",
 			"environment": [],
-			"externalConsole": true,
 			"linux": {
 				"MIMode": "gdb"
 			},
@@ -36,6 +35,25 @@
 			"windows": {
 				"MIMode": "gdb"
 			}
-		}
+		},
+		{
+			"name": "server - launch",
+			"type": "cppdbg",
+			"request": "launch",
+			"program": "${workspaceRoot}/gen/Debug/firebird/bin/firebird",
+			"args": [],
+			"stopAtEntry": false,
+			"cwd": "${workspaceRoot}",
+			"environment": [],
+			"linux": {
+				"MIMode": "gdb"
+			},
+			"osx": {
+				"MIMode": "lldb"
+			},
+			"windows": {
+				"MIMode": "gdb"
+			}
+		},
 	]
 }
