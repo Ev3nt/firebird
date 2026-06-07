@@ -1755,7 +1755,11 @@ punt:
 }
 
 #include <queue>
+#include <unordered_set>
 #include <condition_variable>
+#include "../jrd/os/pio_proto.h"
+
+#include "../common/ThreadStart.h"
 
 class Prefetcher
 {
@@ -1773,51 +1777,144 @@ public:
 			stop_ = true;
 		}
 		cv_.notify_one();
-		if (thread_.joinable())
-			thread_.join();
+		thread_.waitForCompletion();
+
+		if (workerAtt_)
+		{
+			workerAtt_->att_flags |= ATT_shutdown;
+			Attachment::destroy(workerAtt_);
+		}
 	}
 
 	void prefetch(thread_db* tdbb, ULONG* queue, int count)
 	{
+		Database* dbb = tdbb->getDatabase();
+
 		{
 			std::lock_guard<std::mutex> lock(mutex_);
 			for (int i = 0; i < count; i++)
-				pages_.push({tdbb, queue[i]});
+				if (lookup.find(queue[i]) == lookup.end())
+				{
+					pages_.push({dbb, queue[i]});
+					lookup.insert(queue[i]);
+				}
 		}
-		cv_.notify_one(); // или notify_all, если воркеров несколько
+		cv_.notify_one();
 	}
 
 private:
-	Prefetcher() : stop_(false)
+	struct PrefetchItem
 	{
-		thread_ = std::thread([this]()
-		{
-			while (true)
-			{
-				std::unique_lock<std::mutex> lock(mutex_);
-				cv_.wait(lock, [this] { return !pages_.empty() || stop_; });
+		Database*	dbb;
+		ULONG		page;
+	};
 
-				if (stop_ && pages_.empty())
-					return;
-
-				auto [tdbb, page] = pages_.front();
-				pages_.pop();
-				lock.unlock(); // освобождаем мьютекс до I/O
-
-				WIN window(1, page);
-				if (!CCH_FETCH(tdbb, &window, LCK_read, pag_data))
-					continue;
-
-				CCH_RELEASE(tdbb, &window);
-			}
-		});
+	Prefetcher() : stop_(false), workerAtt_(nullptr)
+	{
+		Thread::start(workerEntry, this, THREAD_medium, &thread_);
+		Thread::start(workerEntry, this, THREAD_medium, &thread_2);
+		Thread::start(workerEntry, this, THREAD_medium, &thread_3);
+		Thread::start(workerEntry, this, THREAD_medium, &thread_4);
 	}
 
-	std::queue<std::pair<thread_db*, ULONG>> pages_;
-	std::mutex mutex_;
-	std::condition_variable cv_;
-	std::thread thread_;
-	bool stop_;
+	static THREAD_ENTRY_DECLARE workerEntry(THREAD_ENTRY_PARAM arg)
+	{
+		static_cast<Prefetcher*>(arg)->workerLoop();
+		return nullptr;
+	}
+
+	void initWorkerAttachment(Database* dbb)
+	{
+		// UserId user;
+		// user.setUserName("Prefetcher");
+
+		Jrd::Attachment* attachment = Jrd::Attachment::create(dbb, nullptr);
+		RefPtr<SysStableAttachment> sAtt(FB_NEW SysStableAttachment(attachment));
+		attachment->setStable(sAtt);
+		attachment->att_filename = dbb->dbb_filename;
+		// attachment->att_user = &user;
+
+		FbLocalStatus status_vector;
+		BackgroundContextHolder tdbb(dbb, attachment, &status_vector, FB_FUNCTION);
+		Jrd::Attachment::UseCountHolder use(attachment);
+
+		LCK_init(tdbb, LCK_OWNER_attachment);
+		PAG_header(tdbb, true);
+		PAG_attachment_id(tdbb);
+
+		workerAtt_  = attachment;
+		workerSAtt_ = sAtt;
+	}
+
+	void workerLoop()
+	{
+		while (true)
+		{
+			std::unique_lock<std::mutex> lock(mutex_);
+			cv_.wait(lock, [this] { return !pages_.empty() || stop_; });
+
+			if (stop_ && pages_.empty())
+				return;
+
+			auto item = pages_.front();
+			pages_.pop();
+			lookup.erase(item.page);
+			lock.unlock();
+
+			if (!workerAtt_)
+				initWorkerAttachment(item.dbb);
+
+			fetchPage(item);
+		}
+	}
+
+	void fetchPage(const PrefetchItem& item)
+	{
+		static std::atomic<int> workerCount{0};
+		int wc = ++workerCount;
+
+		FbLocalStatus status_vector;
+		BackgroundContextHolder tdbb(item.dbb, workerAtt_, &status_vector, FB_FUNCTION);
+		Jrd::Attachment::UseCountHolder use(workerAtt_);
+
+		WIN window(DB_PAGE_SPACE, item.page);
+
+		// auto start = std::chrono::steady_clock::now();
+		// bool fetched = CCH_FETCH_TIMEOUT(tdbb, &window, LCK_read, pag_undefined, LCK_NO_WAIT);
+		CCH_pref(tdbb, window.win_page);
+		// auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+			// std::chrono::steady_clock::now() - start).count();
+
+		// if (fetched)
+		// {
+			// CCH_RELEASE(tdbb, &window);
+		// }
+
+		// if (fetched)
+		// {
+		// 	CCH_RELEASE(tdbb, &window);
+		// 	if (wc % 100 == 0)
+		// 		printf("WORKER: count=%d page=%lu time=%lldus\n", wc, item.page, elapsed);
+		// }
+		// else
+		// {
+		// 	if (wc % 100 == 0)
+		// 		printf("WORKER: count=%d page=%lu SKIPPED\n", wc, item.page);
+		// }
+	}
+
+	std::queue<PrefetchItem>				pages_;
+	std::unordered_set<ULONG>				lookup;
+
+	std::mutex								mutex_;
+	std::condition_variable					cv_;
+	Thread									thread_;
+	Thread									thread_2;
+	Thread									thread_3;
+	Thread									thread_4;
+	bool									stop_;
+	Jrd::Attachment*						workerAtt_;
+	Firebird::RefPtr<SysStableAttachment>	workerSAtt_;
 };
 
 
@@ -1969,7 +2066,7 @@ bool DPM_next(thread_db* tdbb, record_param* rpb, USHORT lock_type, FindNextReco
 #endif
 				if (scope != DPM_next_data_page)
 				{
-					static constexpr int PREFETCH_MAX_PAGES = 5;
+					static constexpr int PREFETCH_MAX_PAGES = 20;
 					USHORT tslot = slot;
 					int i;
 

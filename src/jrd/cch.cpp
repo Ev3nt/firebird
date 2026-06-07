@@ -836,7 +836,6 @@ pag* CCH_fetch(thread_db* tdbb, WIN* window, int lock_type, SCHAR page_type, int
 	return window->win_buffer;
 }
 
-
 LockState CCH_fetch_lock(thread_db* tdbb, WIN* window, int lock_type, int wait, SCHAR page_type)
 {
 /**************************************
@@ -878,7 +877,6 @@ LockState CCH_fetch_lock(thread_db* tdbb, WIN* window, int lock_type, int wait, 
 		SDW_get_shadows(tdbb);
 
 	// Look for the page in the cache.
-
 	BufferDesc* bdb = get_buffer(tdbb, window->win_page,
 		((lock_type >= LCK_write) ? SYNC_EXCLUSIVE : SYNC_SHARED), wait);
 
@@ -973,14 +971,13 @@ void CCH_fetch_page(thread_db* tdbb, WIN* window, const bool read_shadow)
 			Database *dbb = tdbb->getDatabase();
 			int retryCount = 0;
 
+			auto start = std::chrono::steady_clock::now();
 			while (!PIO_read(tdbb, file, bdb, page, status))
-	 		{
+			{
 				if (isTempPage || !read_shadow)
 					return false;
-
 				if (!CCH_rollover_to_shadow(tdbb, dbb, file, false))
- 					return false;
-
+					return false;
 				if (file != pageSpace->file)
 					file = pageSpace->file;
 				else
@@ -991,7 +988,18 @@ void CCH_fetch_page(thread_db* tdbb, WIN* window, const bool read_shadow)
 						return false;
 					}
 				}
- 			}
+			}
+			auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - start).count();
+
+			static std::atomic<long long> totalTime{0};
+			static std::atomic<int> totalCount{0};
+			totalTime += elapsed;
+			int count = ++totalCount;
+
+			// if (count % 100 == 0)
+			// 	printf("PIO_read: count=%d avg=%lldus total=%lldms\n",
+			// 		count, totalTime.load() / count, totalTime.load() / 1000);
 
 			return true;
 		}
@@ -1078,6 +1086,35 @@ void CCH_fetch_page(thread_db* tdbb, WIN* window, const bool read_shadow)
 	window->win_buffer = bdb->bdb_buffer;
 }
 
+void CCH_pref(thread_db* tdbb, PageNumber pageNum)
+{
+	BufferDesc* bdb = get_buffer(tdbb, pageNum, SYNC_SHARED, 0);
+	if (!bdb)
+		return;
+
+	if (bdb->bdb_flags & BDB_read_pending)
+	{
+		// EngineCheckout cout(tdbb, FB_FUNCTION);
+
+		// PageSpace* pageSpace = tdbb->getDatabase()->dbb_page_manager.findPageSpace(DB_PAGE_SPACE);
+		// if (pageSpace && pageSpace->file)
+		// {
+		// 	FB_UINT64 offset = bdb->bdb_bcb->bcb_page_size * pageNum.getPageNum();
+		// 	os_utils::pread(pageSpace->file->fil_desc, bdb->bdb_buffer, tdbb->getDatabase()->dbb_page_size, offset);
+		// }
+
+		PageSpace* pageSpace = tdbb->getDatabase()->dbb_page_manager.findPageSpace(DB_PAGE_SPACE);
+		if (pageSpace && pageSpace->file)
+		{
+			FbLocalStatus status_vector;
+			PIO_read(tdbb, pageSpace->file, bdb, bdb->bdb_buffer, &status_vector);
+		}
+
+		bdb->bdb_flags &= ~BDB_read_pending;
+	}
+
+	bdb->release(tdbb, false);
+}
 
 void CCH_forget_page(thread_db* tdbb, WIN* window)
 {
@@ -1516,6 +1553,9 @@ pag* CCH_handoff(thread_db*	tdbb, WIN* window, ULONG page, int lock, SCHAR page_
 	}
 	else
 		must_read = CCH_fetch_lock(tdbb, window, lock, wait, page_type);
+
+	// if (must_read == lsLocked)
+	// 	printf("Cache miss((( %d\n", window->win_page.getPageNum());
 
 	// Latch or lock timeout, return failure.
 

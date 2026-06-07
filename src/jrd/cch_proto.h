@@ -77,6 +77,8 @@ void		CCH_flush_ast(Jrd::thread_db*);
 bool		CCH_write_all_shadows(Jrd::thread_db*, Jrd::Shadow*, Jrd::BufferDesc*, Ods::pag*,
 					 Jrd::FbStatusVector*, const bool);
 
+void CCH_pref(Jrd::thread_db* tdbb, Jrd::PageNumber pageNum);
+
 // macros for dealing with cache pages
 
 inline Ods::pag* CCH_FETCH(Jrd::thread_db* tdbb, Jrd::win* window, USHORT lock_type, SCHAR page_type)
