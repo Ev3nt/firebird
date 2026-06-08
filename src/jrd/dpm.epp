@@ -1870,9 +1870,6 @@ private:
 
 	void fetchPage(const PrefetchItem& item)
 	{
-		static std::atomic<int> workerCount{0};
-		int wc = ++workerCount;
-
 		FbLocalStatus status_vector;
 		BackgroundContextHolder tdbb(item.dbb, workerAtt_, &status_vector, FB_FUNCTION);
 		Jrd::Attachment::UseCountHolder use(workerAtt_);
@@ -1888,18 +1885,6 @@ private:
 		// if (fetched)
 		// {
 			// CCH_RELEASE(tdbb, &window);
-		// }
-
-		// if (fetched)
-		// {
-		// 	CCH_RELEASE(tdbb, &window);
-		// 	if (wc % 100 == 0)
-		// 		printf("WORKER: count=%d page=%lu time=%lldus\n", wc, item.page, elapsed);
-		// }
-		// else
-		// {
-		// 	if (wc % 100 == 0)
-		// 		printf("WORKER: count=%d page=%lu SKIPPED\n", wc, item.page);
 		// }
 	}
 
