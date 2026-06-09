@@ -1776,14 +1776,11 @@ public:
 			std::lock_guard<std::mutex> lock(mutex_);
 			stop_ = true;
 		}
-		cv_.notify_one();
+		cv_.notify_all();
 		thread_.waitForCompletion();
 
-		if (workerAtt_)
-		{
-			workerAtt_->att_flags |= ATT_shutdown;
-			Attachment::destroy(workerAtt_);
-		}
+		workerAtt_ = nullptr;
+		workerSAtt_ = nullptr;
 	}
 
 	void prefetch(thread_db* tdbb, ULONG* queue, int count)
@@ -1793,10 +1790,10 @@ public:
 		{
 			std::lock_guard<std::mutex> lock(mutex_);
 			for (int i = 0; i < count; i++)
-				if (lookup.find(queue[i]) == lookup.end())
+				if (lookup_.find(queue[i]) == lookup_.end())
 				{
 					pages_.push({dbb, queue[i]});
-					lookup.insert(queue[i]);
+					lookup_.insert(queue[i]);
 				}
 		}
 		cv_.notify_one();
@@ -1825,14 +1822,10 @@ private:
 
 	void initWorkerAttachment(Database* dbb)
 	{
-		// UserId user;
-		// user.setUserName("Prefetcher");
-
 		Jrd::Attachment* attachment = Jrd::Attachment::create(dbb, nullptr);
 		RefPtr<SysStableAttachment> sAtt(FB_NEW SysStableAttachment(attachment));
 		attachment->setStable(sAtt);
 		attachment->att_filename = dbb->dbb_filename;
-		// attachment->att_user = &user;
 
 		FbLocalStatus status_vector;
 		BackgroundContextHolder tdbb(dbb, attachment, &status_vector, FB_FUNCTION);
@@ -1858,7 +1851,7 @@ private:
 
 			auto item = pages_.front();
 			pages_.pop();
-			lookup.erase(item.page);
+			lookup_.erase(item.page);
 			lock.unlock();
 
 			if (!workerAtt_)
@@ -1876,20 +1869,11 @@ private:
 
 		WIN window(DB_PAGE_SPACE, item.page);
 
-		// auto start = std::chrono::steady_clock::now();
-		// bool fetched = CCH_FETCH_TIMEOUT(tdbb, &window, LCK_read, pag_undefined, LCK_NO_WAIT);
 		CCH_pref(tdbb, window.win_page);
-		// auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-			// std::chrono::steady_clock::now() - start).count();
-
-		// if (fetched)
-		// {
-			// CCH_RELEASE(tdbb, &window);
-		// }
 	}
 
 	std::queue<PrefetchItem>				pages_;
-	std::unordered_set<ULONG>				lookup;
+	std::unordered_set<ULONG>				lookup_;
 
 	std::mutex								mutex_;
 	std::condition_variable					cv_;
