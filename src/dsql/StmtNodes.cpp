@@ -2160,7 +2160,38 @@ void DeclareLocalTableNode::reset(thread_db* tdbb, Request* request) const
 	if (relation)
 	{
 		const auto permanent = relation->getPermanent();
-		permanent->delPages(tdbb, request->getLocalTableInstanceId(tdbb));
+		const auto tempInstanceId = request->getLocalTableInstanceId(tdbb);
+		const auto transaction = request->req_transaction;
+
+		try
+		{
+			permanent->delPages(tdbb, tempInstanceId);
+
+			if (transaction)
+				transaction->discardTempFrameActions(relation, tempInstanceId);
+		}
+		catch (const Exception&)
+		{
+			fb_assert(false);
+
+			if (transaction)
+			{
+				try
+				{
+					transaction->discardTempFrameActions(relation, tempInstanceId);
+				}
+				catch (const Exception&)
+				{
+					// Preserve the original frame teardown error.
+					fb_assert(false);
+				}
+			}
+
+			for (auto current = transaction; current; current = current->tra_outer)
+				current->tra_flags |= TRA_invalidated;
+
+			throw;
+		}
 	}
 }
 
@@ -3408,7 +3439,7 @@ const StmtNode* EraseNode::erase(thread_db* tdbb, Request* request, WhichTrigger
 	if (localTableNumber.has_value())
 	{
 		localTableRequest = request->getLocalTableRequest(localTableOuterDecl);
-		localTable = localTableRequest->getStatement()->localTables[localTableNumber.value()];
+		localTable = request->getStatement()->localTables[localTableNumber.value()];
 
 		if (localTable->useLtt)
 		{
@@ -9106,7 +9137,7 @@ const StmtNode* ModifyNode::modify(thread_db* tdbb, Request* request, WhichTrigg
 
 	const auto localTableRequest = request->getLocalTableRequest(localTableOuterDecl);
 	const auto localTable = localTableNumber.has_value() ?
-		localTableRequest->getStatement()->localTables[localTableNumber.value()] : nullptr;
+		request->getStatement()->localTables[localTableNumber.value()] : nullptr;
 
 	if (localTable && localTable->useLtt)
 	{
@@ -10312,7 +10343,7 @@ const StmtNode* StoreNode::store(thread_db* tdbb, Request* request, WhichTrigger
 	const auto localTableRequest = request->getLocalTableRequest(
 		localTableSource && localTableSource->outerDecl);
 	const auto localTable = localTableSource ?
-		localTableRequest->getStatement()->localTables[localTableSource->tableNumber] :
+		request->getStatement()->localTables[localTableSource->tableNumber] :
 		nullptr;
 	const auto localTableImpure = localTable && !localTable->useLtt ?
 		localTable->getImpure(tdbb, localTableRequest) : nullptr;

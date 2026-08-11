@@ -24,6 +24,7 @@
 #include "../jrd/align.h"
 #include "../jrd/jrd.h"
 #include "../jrd/req.h"
+#include "../jrd/tra.h"
 #include "../dsql/StmtNodes.h"
 #include "../jrd/optimizer/Optimizer.h"
 #include "../jrd/dpm_proto.h"
@@ -61,6 +62,9 @@ void LocalTableStream::internalOpen(thread_db* tdbb) const
 
 	const auto rpb = &request->req_rpb[m_stream];
 	rpb->getWindow(tdbb).win_flags = 0;
+	rpb->rpb_number.setValue(BOF_NUMBER);
+
+	impure->cursorSavepoint = 0;
 
 	const auto localTableRequest = impure->localTableRequest = request->getLocalTableRequest(m_outerDecl);
 
@@ -72,22 +76,16 @@ void LocalTableStream::internalOpen(thread_db* tdbb) const
 
 		rpb->rpb_relation = m_table->getRelation(tdbb, localTableRequest);
 		rpb->rpb_temp_instance_id = tempInstanceId;
-	}
 
-	rpb->rpb_number.setValue(BOF_NUMBER);
-
-	// Inside an autonomous transaction block, reading a DLTT uses the parent transaction.
-	// The parent's top savepoint already holds a verb action for this relation (from the
-	// INSERT that made the data visible), so get_undo_data returns udForceBack, hiding
-	// all freshly-inserted rows. Bypass cursor stability for this case only — non-autonomous
-	// reads must keep cursor stability so that INSERT...SELECT from the same DLTT does not
-	// recurse into rows inserted by the current statement.
-	if (m_table->useLtt)
-	{
 		if (localTableRequest->req_auto_trans.hasData())
-			rpb->rpb_stream_flags |= RPB_s_unstable;
-		else
-			rpb->rpb_stream_flags &= ~RPB_s_unstable;
+		{
+			const auto transaction = localTableRequest->getLocalTableTransaction();
+
+			// Keep rows inserted after this stream was opened out of the scan while
+			// retaining visibility of rows inserted before the autonomous block.
+			if (!(transaction->tra_flags & TRA_system) && transaction->tra_save_point)
+				impure->cursorSavepoint = transaction->startSavepoint()->getNumber();
+		}
 	}
 }
 
@@ -101,6 +99,20 @@ void LocalTableStream::close(thread_db* tdbb) const
 
 	if (impure->irsb_flags & irsb_open)
 		impure->irsb_flags &= ~irsb_open;
+
+	if (impure->cursorSavepoint)
+	{
+		const auto transaction = impure->localTableRequest->getLocalTableTransaction();
+
+		while (transaction->tra_save_point &&
+			transaction->tra_save_point->getNumber() >= impure->cursorSavepoint)
+		{
+			fb_assert(!transaction->tra_save_point->isChanging());
+			transaction->releaseSavepoint(tdbb);
+		}
+
+		impure->cursorSavepoint = 0;
+	}
 }
 
 bool LocalTableStream::internalGetRecord(thread_db* tdbb) const

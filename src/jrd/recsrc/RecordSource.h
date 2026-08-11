@@ -1470,6 +1470,7 @@ namespace Jrd
 		struct Impure : public RecordSource::Impure
 		{
 			Request* localTableRequest;
+			SavNumber cursorSavepoint;
 		};
 
 	private:
